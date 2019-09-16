@@ -504,7 +504,7 @@ def cached_execute_query(sql, user, db_host, port, pwd, db_name,
     if sql_cache is not None and hashed_sql in sql_cache.archive:
         # load it and return
         # print("loaded {} from cache".format(hashed_sql))
-        return sql_cache.archive[hashed_sql]
+        return (sql_cache.archive[hashed_sql], True)
 
     start = time.time()
 
@@ -535,7 +535,7 @@ def cached_execute_query(sql, user, db_host, port, pwd, db_name,
             print("failed to execute for reason other than timeout")
             print(e)
             pdb.set_trace()
-        return None
+        return (None, False)
 
     exp_output = cursor.fetchall()
     cursor.close()
@@ -544,7 +544,7 @@ def cached_execute_query(sql, user, db_host, port, pwd, db_name,
     if (end - start > execution_cache_threshold) \
             and sql_cache is not None:
         sql_cache.archive[hashed_sql] = exp_output
-    return exp_output
+    return (exp_output, False)
 
 def deterministic_hash(string):
     return int(hashlib.sha1(str(string).encode("utf-8")).hexdigest(), 16)

@@ -4,6 +4,7 @@ import time
 import itertools
 import json
 import pdb
+from progressbar import progressbar as bar
 
 def parse_sql(sql, user, db_name, db_host, port, pwd,
      sql_cache_dir=None, timeout=120000,
@@ -43,8 +44,11 @@ def parse_sql(sql, user, db_name, db_host, port, pwd,
     join_graph = _extract_join_graph(sql)
     subset_graph = generate_subset_graph(join_graph)
 
-    print("num subqueries: ", len(subset_graph))
-    print("took: ", time.time() - start)
+    print("query has",
+          len(join_graph.nodes), "relations,",
+          len(join_graph.edges), "joins, and",
+          len(subset_graph), " possible subsets.",
+          "took:", time.time() - start)
 
     ret = {}
     ret["sql"] = sql
@@ -60,28 +64,28 @@ def parse_sql(sql, user, db_name, db_host, port, pwd,
     # let us update the ground truth values
     edges = get_optimal_edges(subset_graph)
     paths = list(reconstruct_paths(edges))
-    print("edges: ", len(edges))
-    print("paths: ", len(paths))
+    #print("edges: ", len(edges))
+    #print("paths: ", len(paths))
 
     subset_sqls = []
 
     for path in paths:
-        print(path)
         join_order = list(path_to_join_order(path))
         join_order.reverse()
         join_order_nodes = []
-
         # FIXME: can we choose the join order of each set more intelligently in
         # order to prevent bad plans slowing everything down?
         for j_set in join_order:
             # within a set, the order doesn't matter
             for j_node in j_set:
                 join_order_nodes.append(j_node)
-        print(join_order_nodes)
+
         sql = _nodes_to_sql(join_order_nodes, join_graph)
         sql = "explain (analyze on, timing off, format json) " + sql
-        print(sql)
         subset_sqls.append(sql)
+
+    print("computing all", len(subset_graph), "subset cardinalities with"
+          , len(subset_sqls), "queries")
 
     # TODO: parallelize this
     pre_exec_sqls = []
@@ -93,17 +97,26 @@ def parse_sql(sql, user, db_name, db_host, port, pwd,
     if timeout:
         pre_exec_sqls.append("set statement_timeout = {}".format(timeout))
 
-    sql = subset_sqls[20]
-    res = cached_execute_query(sql, user, db_host, port, pwd, db_name,
-            pre_exec_sqls,
-            30, sql_cache_dir)
+    total_cached = 0
+    total_computed = 0
+    for sql in bar(subset_sqls):
+        res, was_cached = cached_execute_query(sql, user, db_host, port, pwd, db_name,
+                                               pre_exec_sqls,
+                                               30, sql_cache_dir)
+        if was_cached:
+            total_cached += 1
+        else:
+            total_computed += 1
 
-    plan = res[0][0][0]
-    plan_tree = plan["Plan"]
-    results = list(analyze_plan(plan_tree))
-    for result in results:
-        assert nx.is_connected(join_graph.subgraph(result["aliases"]))
-        print(result)
+        plan = res[0][0][0]
+        plan_tree = plan["Plan"]
+        results = list(analyze_plan(plan_tree))
+        for result in results:
+            assert nx.is_connected(join_graph.subgraph(result["aliases"]))
+            #print(result)
+
+    print("computed:", total_computed, "cached:", total_cached)
+    print("total time:", time.time() - start)
 
     return ret
 
