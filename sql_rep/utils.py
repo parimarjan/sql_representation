@@ -9,6 +9,7 @@ import networkx as nx
 import itertools
 import hashlib
 import psycopg2 as pg
+import shelve
 
 # get rid of these
 import getpass
@@ -41,13 +42,16 @@ def generate_subset_graph(g):
 
     return subset_graph
 
-def get_optimal_edges(sg, draw_each=False):
+def get_optimal_edges(sg):
     paths = {}
     orig_sg = sg
     sg = sg.copy()
     while len(sg.edges) != 0:
-        # first, find the root(s) of the subgraph.
+        # first, find the root(s) of the subgraph at the highest level
         roots = {n for n,d in sg.in_degree() if d == 0}
+        max_size_root = len(max(roots, key=lambda x: len(x)))
+        roots = {r for r in roots if len(r) == max_size_root}
+        
         # find everything within reach of 1
         reach_1 = set()
         for root in roots:
@@ -60,11 +64,25 @@ def get_optimal_edges(sg, draw_each=False):
         matching = bipartite.hopcroft_karp_matching(bipart_layer, roots)
         matching = { k: v for k,v in matching.items() if k in roots}
 
-        if draw_each:
-            draw_graph(orig_sg,
-                       highlight_nodes=bipart_layer.nodes,
-                       bold_edges=matching.items())
+        # sanity check -- every vertex should appear in exactly one path
+        assert len(set(matching.values())) == len(matching)
+        
+        # find unmatched roots and add a path to $, indicating that
+        # the path has terminated.
+        for unmatched_root in roots - matching.keys():
+            matching[unmatched_root] = "$"
+        assert len(matching) == len(roots)
 
+        # sanity check -- nothing was already in our paths
+        for k, v in matching.items():
+            assert k not in paths.keys()
+            assert v not in paths.keys()                
+            assert v == "$" or v not in paths.values()
+
+        # sanity check -- all roots have an edge assigned
+        for root in roots:
+            assert root in matching.keys()
+        
         paths.update(matching)
 
         # remove the old roots
@@ -77,8 +95,17 @@ def reconstruct_paths(edges):
         g.add_nodes_from(pair)
 
     for v1, v2 in edges.items():
+        if v2 != "$":
+            assert len(v1) > len(v2) and set(v1) > set(v2)
         g.add_edge(v1, v2)
 
+
+    if "$" in g.nodes:
+        g.remove_node("$")
+
+    for node in g.nodes:
+        assert g.degree(node) <= 2, f"{node} had degree of {g.degree(node)}"
+        
     conn_comp = nx.algorithms.components.connected_components(g)
     paths = (sorted(x, key=len, reverse=True) for x in conn_comp)
     return paths
@@ -101,30 +128,42 @@ def path_to_join_order(path):
         remaining -= diff
     yield remaining
 
-def path_to_from_clause(path, alias_mapping):
-    join_order = list(path_to_join_order(path))
-    join_order.reverse()
-
+def order_to_from_clause(join_graph, join_order, alias_mapping):
     clauses = []
     for rels in join_order:
-        clause = " CROSS JOIN ".join([f"{alias_mapping[alias]} as {alias}" for alias in rels])
         if len(rels) > 1:
-            clause = "( " + clause + ")"
+            # we should ask PG for an ordering here, since there's
+            # no way to specify that the optimizer should control only these
+            # bottom-level joins.
+            sg = join_graph.subgraph(rels)
+            sql = nx_graph_to_query(sg)
+            pg_order = get_pg_join_order(sql, join_graph)
+            assert not clauses
+            clauses.append(pg_order)
+            continue
+
+        clause = f"{alias_mapping[rels[0]]} as {rels[0]}" 
         clauses.append(clause)
 
     return " CROSS JOIN ".join(clauses)
 
-join_types = set(["Nested Loop", "Hash Join"])
+join_types = set(["Nested Loop", "Hash Join", "Merge Join"])
 
-def extract_aliases(plan):
+def extract_aliases(plan, jg=None):
     if "Alias" in plan:
-        yield plan["Alias"]
+        assert plan["Node Type"] == "Bitmap Heap Scan" or "Plans" not in plan
+        if jg:
+            alias = plan["Alias"]
+            real_name = jg.nodes[alias]["real_name"]
+            yield f"{real_name} as {alias}"
+        else:
+            yield plan["Alias"]
 
     if "Plans" not in plan:
         return
 
     for subplan in plan["Plans"]:
-        yield from extract_aliases(subplan)
+        yield from extract_aliases(subplan, jg=jg)
 
 def analyze_plan(plan):
     if plan["Node Type"] in join_types:
@@ -143,7 +182,7 @@ def analyze_plan(plan):
 functions copied over from pari's util files
 '''
 
-def nx_graph_to_query(G):
+def nx_graph_to_query(G, from_clause=None):
     froms = []
     conds = []
     for nd in G.nodes(data=True):
@@ -164,7 +203,7 @@ def nx_graph_to_query(G):
     # preserve order for caching
     froms.sort()
     conds.sort()
-    from_clause = " , ".join(froms)
+    from_clause = " , ".join(froms) if from_clause is None else from_clause
     if len(conds) > 0:
         wheres = ' AND '.join(conds)
         from_clause += " WHERE " + wheres
@@ -441,6 +480,7 @@ def find_next_match(tables, wheres, index):
         return index, None
 
     return index, match
+
 def find_all_clauses(tables, wheres):
     matched = []
     # print(tables)
@@ -481,9 +521,7 @@ def find_all_tables_till_keyword(token):
 
     return tables
 
-def cached_execute_query(sql, user, db_host, port, pwd, db_name,
-        pre_execs, execution_cache_threshold,
-        sql_cache_dir=None):
+def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
     '''
     @db_host: going to ignore it so default localhost is used.
     @pre_execs: options like set join_collapse_limit to 1 that are executed
@@ -492,19 +530,6 @@ def cached_execute_query(sql, user, db_host, port, pwd, db_name,
     executes the given sql on the DB, and caches the results in a
     persistent store if it took longer than self.execution_cache_threshold.
     '''
-    sql_cache = None
-    if sql_cache_dir is not None:
-        assert isinstance(sql_cache_dir, str)
-        sql_cache = klepto.archives.dir_archive(sql_cache_dir,
-                cached=True, serialized=True)
-
-    hashed_sql = deterministic_hash(sql)
-
-    # archive only considers the stuff stored in disk
-    if sql_cache is not None and hashed_sql in sql_cache.archive:
-        # load it and return
-        # print("loaded {} from cache".format(hashed_sql))
-        return (sql_cache.archive[hashed_sql], True)
 
     start = time.time()
 
@@ -535,16 +560,45 @@ def cached_execute_query(sql, user, db_host, port, pwd, db_name,
             print("failed to execute for reason other than timeout")
             print(e)
             pdb.set_trace()
-        return (None, False)
+        return None
 
     exp_output = cursor.fetchall()
     cursor.close()
     con.close()
     end = time.time()
-    if (end - start > execution_cache_threshold) \
-            and sql_cache is not None:
-        sql_cache.archive[hashed_sql] = exp_output
-    return (exp_output, False)
+
+    return exp_output
 
 def deterministic_hash(string):
-    return int(hashlib.sha1(str(string).encode("utf-8")).hexdigest(), 16)
+    return hashlib.sha1(str(string).encode("utf-8")).hexdigest()
+
+def get_pg_join_order(sql, join_graph):
+    def __extract_jo(plan):
+        if plan["Node Type"] in join_types:
+            left = list(extract_aliases(plan["Plans"][0], jg=join_graph))
+            right = list(extract_aliases(plan["Plans"][1], jg=join_graph))
+
+            if len(left) == 1 and len(right) == 1:
+                return left[0] +  " CROSS JOIN " + right[0]
+
+            if len(left) == 1:
+                return left[0] + " CROSS JOIN (" + __extract_jo(plan["Plans"][1]) + ")"
+
+            if len(right) == 1:
+                return "(" + __extract_jo(plan["Plans"][0]) + ") CROSS JOIN " + right[0]
+
+            return ("(" + __extract_jo(plan["Plans"][0])
+                    + ") CROSS JOIN ("
+                    + __extract_jo(plan["Plans"][1]) + ")")
+        
+        return __extract_jo(plan["Plans"][0])
+    
+    con = pg.connect(user="imdb", host="localhost", database="imdb")
+    cursor = con.cursor()
+
+    cursor.execute(f"explain (format json) {sql}")
+    exp_output = cursor.fetchall()
+    cursor.close()
+    con.close()
+
+    return __extract_jo(exp_output[0][0][0]["Plan"])

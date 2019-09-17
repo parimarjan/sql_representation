@@ -29,4 +29,4 @@ for fn in fns:
             sqls.append(sql)
 
 sql_json = parse_sql(sqls[1], args.user, args.db_name,
-        args.db_host, args.port, args.pwd)
+                     args.db_host, args.port, args.pwd)

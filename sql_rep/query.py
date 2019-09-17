@@ -6,9 +6,7 @@ import json
 import pdb
 from progressbar import progressbar as bar
 
-def parse_sql(sql, user, db_name, db_host, port, pwd,
-     sql_cache_dir=None, timeout=120000,
-        compute_ground_truth=True):
+def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=120000, compute_ground_truth=True):
     '''
     @sql: sql query string.
 
@@ -55,36 +53,54 @@ def parse_sql(sql, user, db_name, db_host, port, pwd,
     ret["join_graph"] = join_graph
     ret["subset_graph"] = subset_graph
 
+    # we should check and see which cardinalities of the subset graph
+    # we already know. Note thate we have to cache at this level because
+    # the maximal matching might make arbitrary choices each time.
+    with shelve.open("subset_cache") as cache:
+        if sql in cache:
+            currently_stored = cache[sql]
+        else:
+            currently_stored = {}
+
+    unknown_subsets = subset_graph.copy()
+    unknown_subsets = unknown_subsets.subgraph(subset_graph.nodes - currently_stored.keys())
+
+    print(len(unknown_subsets.nodes), "/", len(subset_graph.nodes), "subsets still unknown")
+    print(len(currently_stored), "subsets known.")
     if not compute_ground_truth:
         # TODO: convert these to json strs
         return ret
 
-    # execution time, to collect ground truth
-
     # let us update the ground truth values
-    edges = get_optimal_edges(subset_graph)
+    edges = get_optimal_edges(unknown_subsets)
     paths = list(reconstruct_paths(edges))
-    #print("edges: ", len(edges))
-    #print("paths: ", len(paths))
+    for p in paths:
+        for el1, el2 in zip(p, p[1:]):
+            assert len(el1) > len(el2)
+        
 
+
+    # ensure the paths we constructed cover every possible path
+    sanity_check_unknown_subsets = unknown_subsets.copy()
+    for n1, n2 in edges.items():
+        if n1 in sanity_check_unknown_subsets.nodes:
+            sanity_check_unknown_subsets.remove_node(n1)
+        if n2 in sanity_check_unknown_subsets.nodes:
+            sanity_check_unknown_subsets.remove_node(n2)
+
+    assert len(sanity_check_unknown_subsets.nodes) == 0
+    
     subset_sqls = []
 
     for path in paths:
-        join_order = list(path_to_join_order(path))
+        join_order = [tuple(sorted(x)) for x in path_to_join_order(path)]
         join_order.reverse()
-        join_order_nodes = []
-        # FIXME: can we choose the join order of each set more intelligently in
-        # order to prevent bad plans slowing everything down?
-        for j_set in join_order:
-            # within a set, the order doesn't matter
-            for j_node in j_set:
-                join_order_nodes.append(j_node)
+        sql_to_exec = _nodes_to_sql(join_order, join_graph)
+        sql_to_exec = "explain (analyze on, timing off, format json) " + sql_to_exec
+        subset_sqls.append(sql_to_exec)
+              
 
-        sql = _nodes_to_sql(join_order_nodes, join_graph)
-        sql = "explain (analyze on, timing off, format json) " + sql
-        subset_sqls.append(sql)
-
-    print("computing all", len(subset_graph), "subset cardinalities with"
+    print("computing all", len(unknown_subsets), "unknown subset cardinalities with"
           , len(subset_sqls), "queries")
 
     # TODO: parallelize this
@@ -97,33 +113,46 @@ def parse_sql(sql, user, db_name, db_host, port, pwd,
     if timeout:
         pre_exec_sqls.append("set statement_timeout = {}".format(timeout))
 
-    total_cached = 0
-    total_computed = 0
-    for sql in bar(subset_sqls):
-        res, was_cached = cached_execute_query(sql, user, db_host, port, pwd, db_name,
-                                               pre_exec_sqls,
-                                               30, sql_cache_dir)
-        if was_cached:
-            total_cached += 1
-        else:
-            total_computed += 1
-
+    sanity_check_unknown_subsets = unknown_subsets.copy()
+    for path_sql in bar(subset_sqls):
+        print(path_sql)
+        res = execute_query(path_sql, user, db_host, port, pwd, db_name,
+                                        pre_exec_sqls)
         plan = res[0][0][0]
         plan_tree = plan["Plan"]
         results = list(analyze_plan(plan_tree))
         for result in results:
-            assert nx.is_connected(join_graph.subgraph(result["aliases"]))
-            #print(result)
+            assert nx.is_connected(join_graph.subgraph(result["aliases"])), (result["aliases"], plan_tree)
+            aliases_key = tuple(sorted(result["aliases"]))
+            currently_stored[aliases_key] = {"expected": result["expected"],
+                                             "actual": result["actual"]}
+            
+            if aliases_key in sanity_check_unknown_subsets.nodes:
+                sanity_check_unknown_subsets.remove_node(aliases_key)
 
-    print("computed:", total_computed, "cached:", total_cached)
+    print(len(currently_stored), "total subsets now known")
+
+    print("Still unknown:", sanity_check_unknown_subsets.nodes)
+    
+    #with shelve.open("subset_cache") as cache:
+    #    cache[sql] = currently_stored
+
     print("total time:", time.time() - start)
 
     return ret
 
 def _nodes_to_sql(nodes, join_graph):
-    subg = join_graph.subgraph(nodes)
+    alias_mapping = {}
+    for node_set in nodes:
+        for node in node_set:
+            alias_mapping[node] = join_graph.nodes[node]["real_name"]
+
+    from_clause = order_to_from_clause(join_graph, nodes, alias_mapping)
+
+    subg = join_graph.subgraph(alias_mapping.keys())
     assert nx.is_connected(subg)
-    sql_str = nx_graph_to_query(subg)
+    
+    sql_str = nx_graph_to_query(subg, from_clause=from_clause)
     return sql_str
 
 def _extract_join_graph(sql):
