@@ -28,5 +28,5 @@ for fn in fns:
             sql = f.read()
             sqls.append(sql)
 
-sql_json = parse_sql(sqls[1], args.user, args.db_name,
+sql_json = parse_sql(sqls[0], args.user, args.db_name,
                      args.db_host, args.port, args.pwd)

@@ -134,8 +134,8 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=120000, compute_gr
 
     print("Still unknown:", sanity_check_unknown_subsets.nodes)
     
-    #with shelve.open("subset_cache") as cache:
-    #    cache[sql] = currently_stored
+    with shelve.open("subset_cache") as cache:
+        cache[sql] = currently_stored
 
     print("total time:", time.time() - start)
 
