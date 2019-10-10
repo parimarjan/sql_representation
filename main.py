@@ -1,6 +1,8 @@
 import glob
+import json
 from sql_rep.query import *
 import argparse
+import re
 
 def read_flags():
     parser = argparse.ArgumentParser()
@@ -17,16 +19,23 @@ def read_flags():
     return parser.parse_args()
 
 
+
+q_num = re.compile(".*/([0-9]+[a-z])\\.sql.*")
+
 args = read_flags()
 # simple testing script
 fns = list(glob.glob("./test_sqls/*"))
-print(fns)
-sqls = []
 for fn in fns:
     if ".sql" in fn:
+        sql_id = q_num.match(fn).group(1)
         with open(fn, "r") as f:
             sql = f.read()
-            sqls.append(sql)
+        print("Processing", sql_id)
+        sql_json = parse_sql(sql, args.user, args.db_name,
+                             args.db_host, args.port, args.pwd,
+                             compute_ground_truth=False)
 
-sql_json = parse_sql(sqls[0], args.user, args.db_name,
-                     args.db_host, args.port, args.pwd)
+        with open(f"parsed/{sql_id}.json", "w") as f:
+            json.dump(sql_json, f)
+            
+

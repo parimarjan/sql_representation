@@ -34,19 +34,27 @@ def generate_subset_graph(g):
     for csg in connected_subgraphs(g):
         subset_graph.add_node(csg)
 
-    for sg1, sg2 in itertools.combinations(subset_graph.nodes, 2):
-        if len(sg1) + 1 == len(sg2) and set(sg1) < set(sg2):
-            subset_graph.add_edge(sg2, sg1)
-        elif len(sg2) + 1 == len(sg1) and set(sg2) < set(sg1):
-            subset_graph.add_edge(sg1, sg2)
+    # group by size
+    max_subgraph_size = max(len(x) for x in subset_graph.nodes)
+    subgraph_groups = [[] for _ in range(max_subgraph_size)]
+    for node in subset_graph.nodes:
+        subgraph_groups[len(node)-1].append(node)
 
+    for g1, g2 in zip(subgraph_groups, subgraph_groups[1:]):
+        for superset in g2:
+            super_as_set = set(superset)
+            for subset in g1:
+                assert len(superset) == len(subset) + 1
+                if set(subset) < super_as_set:
+                    subset_graph.add_edge(superset, subset)
+                    
     return subset_graph
 
 def get_optimal_edges(sg):
     paths = {}
     orig_sg = sg
     sg = sg.copy()
-    while len(sg.edges) != 0:
+    while len(sg.nodes) != 0:
         # first, find the root(s) of the subgraph at the highest level
         roots = {n for n,d in sg.in_degree() if d == 0}
         max_size_root = len(max(roots, key=lambda x: len(x)))
@@ -168,9 +176,13 @@ def extract_aliases(plan, jg=None):
 def analyze_plan(plan):
     if plan["Node Type"] in join_types:
         aliases = extract_aliases(plan)
-        yield {"expected": plan["Plan Rows"],
-               "actual": plan["Actual Rows"],
-               "aliases": list(sorted(aliases))}
+        data = {"aliases": list(sorted(aliases))}
+        if "Plan Rows" in plan:
+            data["expected"] = plan["Plan Rows"]
+        if "Actual Rows" in plan:
+            data["actual"] = plan["Actual Rows"]
+
+        yield data
 
     if "Plans" not in plan:
         return
@@ -231,8 +243,9 @@ def extract_join_clause(query):
     else:
         tables = table_names
     matches = find_all_clauses(tables, where_clauses)
+
     for match in matches:
-        if "=" not in match:
+        if "=" not in match or match.count("=") > 1:
             continue
         match = match.replace(";", "")
         left, right = match.split("=")
@@ -449,12 +462,12 @@ def find_next_match(tables, wheres, index):
         if token is None:
             break
         # print("token.value: ", token.value)
-        if token.value == "AND":
+        if token.value.upper() == "AND":
             break
 
         match += " " + token.value
 
-        if (token.value == "BETWEEN"):
+        if (token.value.upper() == "BETWEEN"):
             # ugh ugliness
             index, a = token_list.token_next(index)
             index, AND = token_list.token_next(index)
@@ -552,15 +565,16 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
     try:
         cursor.execute(sql)
     except Exception as e:
-        cursor.execute("ROLLBACK")
-        con.commit()
-        cursor.close()
-        con.close()
-        if not "timeout" in str(e):
-            print("failed to execute for reason other than timeout")
-            print(e)
-            pdb.set_trace()
-        return None
+        print(e)
+        try:
+            con.commit()
+            cursor.close()
+            con.close()
+        finally:
+            if not "timeout" in str(e):
+                print("failed to execute for reason other than timeout")
+                print(e)
+            return None
 
     exp_output = cursor.fetchall()
     cursor.close()
