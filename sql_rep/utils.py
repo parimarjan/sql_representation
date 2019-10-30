@@ -616,3 +616,50 @@ def get_pg_join_order(sql, join_graph):
     con.close()
 
     return __extract_jo(exp_output[0][0][0]["Plan"])
+
+def extract_join_graph(sql):
+    '''
+    @sql: string
+    '''
+    froms,aliases,tables = extract_from_clause(sql)
+    joins = extract_join_clause(sql)
+    join_graph = nx.Graph()
+
+    for j in joins:
+        j1 = j.split("=")[0]
+        j2 = j.split("=")[1]
+        t1 = j1[0:j1.find(".")].strip()
+        t2 = j2[0:j2.find(".")].strip()
+        try:
+            assert t1 in tables or t1 in aliases
+            assert t2 in tables or t2 in aliases
+        except:
+            print(t1, t2)
+            print(tables)
+            print(joins)
+            print("table not in tables!")
+            pdb.set_trace()
+
+        join_graph.add_edge(t1, t2)
+        join_graph[t1][t2]["join_condition"] = j
+        if t1 in aliases:
+            table1 = aliases[t1]
+            table2 = aliases[t2]
+
+            join_graph.nodes()[t1]["real_name"] = table1
+            join_graph.nodes()[t2]["real_name"] = table2
+
+    parsed = sqlparse.parse(sql)[0]
+    # let us go over all the where clauses
+    where_clauses = None
+    for token in parsed.tokens:
+        if (type(token) == sqlparse.sql.Where):
+            where_clauses = token
+    assert where_clauses is not None
+
+    for t1 in join_graph.nodes():
+        tables = [t1]
+        matches = find_all_clauses(tables, where_clauses)
+        join_graph.nodes()[t1]["predicates"] = matches
+
+    return join_graph
