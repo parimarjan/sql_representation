@@ -11,7 +11,7 @@ def read_flags():
     parser.add_argument("--db_host", type=str, required=False,
             default="localhost")
     parser.add_argument("--user", type=str, required=False,
-            default="imdb")
+            default="ubuntu")
     parser.add_argument("--pwd", type=str, required=False,
             default="")
     parser.add_argument("--port", type=str, required=False,
@@ -34,8 +34,7 @@ for fn in fns:
         sql_json = parse_sql(sql, args.user, args.db_name,
                              args.db_host, args.port, args.pwd,
                              compute_ground_truth=False)
-
+        print(sql_json.keys())
+        break
         with open(f"parsed/{sql_id}.json", "w") as f:
             json.dump(sql_json, f)
-            
-

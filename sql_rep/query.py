@@ -6,7 +6,11 @@ import json
 import pdb
 from progressbar import progressbar as bar
 
-def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_ground_truth=True):
+def get_subset_cache_name(sql):
+    return str(deterministic_hash(sql)[0:5])
+
+def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False,
+        compute_ground_truth=True, subset_cache_dir="./subset_cache/"):
     '''
     @sql: sql query string.
 
@@ -52,11 +56,13 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
     ret["sql"] = sql
     ret["join_graph"] = join_graph
     ret["subset_graph"] = subset_graph
-    
+
+    make_dir(subset_cache_dir)
+    subset_cache_file = subset_cache_dir + get_subset_cache_name(sql)
     # we should check and see which cardinalities of the subset graph
     # we already know. Note thate we have to cache at this level because
     # the maximal matching might make arbitrary choices each time.
-    with shelve.open("subset_cache") as cache:
+    with shelve.open(subset_cache_file) as cache:
         if sql in cache:
             currently_stored = cache[sql]
         else:
@@ -75,7 +81,6 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
     for p in paths:
         for el1, el2 in zip(p, p[1:]):
             assert len(el1) > len(el2)
-        
 
     # ensure the paths we constructed cover every possible path
     sanity_check_unknown_subsets = unknown_subsets.copy()
@@ -86,21 +91,23 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
             sanity_check_unknown_subsets.remove_node(n2)
 
     assert len(sanity_check_unknown_subsets.nodes) == 0
-    
+
     subset_sqls = []
 
     for path in paths:
         join_order = [tuple(sorted(x)) for x in path_to_join_order(path)]
         join_order.reverse()
-        sql_to_exec = _nodes_to_sql(join_order, join_graph)
-        sql_to_exec = "explain (analyze off, timing off, format json) " + sql_to_exec
+        sql_to_exec = nodes_to_sql(join_order, join_graph)
+        if compute_ground_truth:
+            prefix = "explain (analyze, timing off, format json) "
+        else:
+            prefix = "explain (analyze off, timing off, format json) "
+        sql_to_exec = prefix + sql_to_exec
         subset_sqls.append(sql_to_exec)
-              
 
     print("computing all", len(unknown_subsets), "unknown subset cardinalities with"
           , len(subset_sqls), "queries")
 
-    # TODO: parallelize this
     pre_exec_sqls = []
 
     # TODO: if we use the min #queries approach, maybe greedy approach and
@@ -118,7 +125,7 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
             print("Query failed to execute, ignoring.")
             breakpoint()
             continue
-        
+
         plan = res[0][0][0]
         plan_tree = plan["Plan"]
         results = list(analyze_plan(plan_tree))
@@ -132,19 +139,19 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
                                                  "actual": result["actual"]}
             else:
                 currently_stored[aliases_key] = {"expected": result["expected"]}
-                                                 
+
             if aliases_key in sanity_check_unknown_subsets.nodes:
                 sanity_check_unknown_subsets.remove_node(aliases_key)
 
         if idx % 5 == 0:
-            with shelve.open("subset_cache") as cache:
+            with shelve.open(subset_cache_file) as cache:
                 cache[sql] = currently_stored
 
     print(len(currently_stored), "total subsets now known")
 
     assert len(sanity_check_unknown_subsets.nodes) == 0
-    
-    with shelve.open("subset_cache") as cache:
+
+    with shelve.open(subset_cache_file) as cache:
         cache[sql] = currently_stored
 
     for node in subset_graph.nodes:
@@ -155,19 +162,6 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False, compute_gro
     # json-ify the graphs
     ret["join_graph"] = nx.adjacency_data(ret["join_graph"])
     ret["subset_graph"] = nx.adjacency_data(ret["subset_graph"])
-    
+
     return ret
 
-def _nodes_to_sql(nodes, join_graph):
-    alias_mapping = {}
-    for node_set in nodes:
-        for node in node_set:
-            alias_mapping[node] = join_graph.nodes[node]["real_name"]
-
-    from_clause = order_to_from_clause(join_graph, nodes, alias_mapping)
-
-    subg = join_graph.subgraph(alias_mapping.keys())
-    assert nx.is_connected(subg)
-    
-    sql_str = nx_graph_to_query(subg, from_clause=from_clause)
-    return sql_str

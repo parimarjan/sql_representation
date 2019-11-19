@@ -10,6 +10,9 @@ import itertools
 import hashlib
 import psycopg2 as pg
 import shelve
+import pdb
+import os
+import errno
 
 # get rid of these
 import getpass
@@ -23,7 +26,8 @@ functions copied over from ryan's utils files
 '''
 
 def connected_subgraphs(g):
-    for i in range(2, len(g)+1):
+    # for i in range(2, len(g)+1):
+    for i in range(1, len(g)+1):
         for nodes_in_sg in itertools.combinations(g.nodes, i):
             sg = g.subgraph(nodes_in_sg)
             if nx.is_connected(sg):
@@ -47,7 +51,7 @@ def generate_subset_graph(g):
                 assert len(superset) == len(subset) + 1
                 if set(subset) < super_as_set:
                     subset_graph.add_edge(superset, subset)
-                    
+
     return subset_graph
 
 def get_optimal_edges(sg):
@@ -59,7 +63,7 @@ def get_optimal_edges(sg):
         roots = {n for n,d in sg.in_degree() if d == 0}
         max_size_root = len(max(roots, key=lambda x: len(x)))
         roots = {r for r in roots if len(r) == max_size_root}
-        
+
         # find everything within reach of 1
         reach_1 = set()
         for root in roots:
@@ -74,7 +78,7 @@ def get_optimal_edges(sg):
 
         # sanity check -- every vertex should appear in exactly one path
         assert len(set(matching.values())) == len(matching)
-        
+
         # find unmatched roots and add a path to $, indicating that
         # the path has terminated.
         for unmatched_root in roots - matching.keys():
@@ -84,13 +88,13 @@ def get_optimal_edges(sg):
         # sanity check -- nothing was already in our paths
         for k, v in matching.items():
             assert k not in paths.keys()
-            assert v not in paths.keys()                
+            assert v not in paths.keys()
             assert v == "$" or v not in paths.values()
 
         # sanity check -- all roots have an edge assigned
         for root in roots:
             assert root in matching.keys()
-        
+
         paths.update(matching)
 
         # remove the old roots
@@ -113,7 +117,7 @@ def reconstruct_paths(edges):
 
     for node in g.nodes:
         assert g.degree(node) <= 2, f"{node} had degree of {g.degree(node)}"
-        
+
     conn_comp = nx.algorithms.components.connected_components(g)
     paths = (sorted(x, key=len, reverse=True) for x in conn_comp)
     return paths
@@ -145,17 +149,19 @@ def order_to_from_clause(join_graph, join_order, alias_mapping):
             # bottom-level joins.
             sg = join_graph.subgraph(rels)
             sql = nx_graph_to_query(sg)
-            pg_order = get_pg_join_order(sql, join_graph)
+            con = pg.connect(user="ubuntu", host="localhost", database="imdb")
+            pg_order = get_pg_join_order(sql, join_graph, con)
             assert not clauses
             clauses.append(pg_order)
             continue
 
-        clause = f"{alias_mapping[rels[0]]} as {rels[0]}" 
+        clause = f"{alias_mapping[rels[0]]} as {rels[0]}"
         clauses.append(clause)
 
     return " CROSS JOIN ".join(clauses)
 
-join_types = set(["Nested Loop", "Hash Join", "Merge Join"])
+join_types = set(["Nested Loop", "Hash Join", "Merge Join", "Index Scan",\
+        "Seq Scan", "Bitmap Heap Scan"])
 
 def extract_aliases(plan, jg=None):
     if "Alias" in plan:
@@ -181,6 +187,9 @@ def analyze_plan(plan):
             data["expected"] = plan["Plan Rows"]
         if "Actual Rows" in plan:
             data["actual"] = plan["Actual Rows"]
+        else:
+            print("Actual Rows not in plan!")
+            pdb.set_trace()
 
         yield data
 
@@ -193,6 +202,20 @@ def analyze_plan(plan):
 '''
 functions copied over from pari's util files
 '''
+
+def nodes_to_sql(nodes, join_graph):
+    alias_mapping = {}
+    for node_set in nodes:
+        for node in node_set:
+            alias_mapping[node] = join_graph.nodes[node]["real_name"]
+
+    from_clause = order_to_from_clause(join_graph, nodes, alias_mapping)
+
+    subg = join_graph.subgraph(alias_mapping.keys())
+    assert nx.is_connected(subg)
+
+    sql_str = nx_graph_to_query(subg, from_clause=from_clause)
+    return sql_str
 
 def nx_graph_to_query(G, from_clause=None):
     froms = []
@@ -207,7 +230,8 @@ def nx_graph_to_query(G, from_clause=None):
             froms.append(node)
 
         for pred in data["predicates"]:
-            conds.append(pred)
+            if pred not in conds:
+                conds.append(pred)
 
     for edge in G.edges(data=True):
         conds.append(edge[2]['join_condition'])
@@ -247,6 +271,9 @@ def extract_join_clause(query):
     for match in matches:
         if "=" not in match or match.count("=") > 1:
             continue
+        if "<=" in match or ">=" in match:
+            continue
+
         match = match.replace(";", "")
         left, right = match.split("=")
         # ugh dumb hack
@@ -266,7 +293,6 @@ def get_all_wheres(parsed_query):
         pred_vals = parsed_query["where"]["and"]
     return pred_vals
 
-# FIXME: get rid of this dependency
 def extract_predicates(query):
     '''
     @ret:
@@ -363,7 +389,21 @@ def extract_predicates(query):
             predicate_types.append(pred_type)
             predicate_cols.append(column)
             predicate_vals.append(vals)
+        elif pred_type == "or":
+            for pred2 in pred[pred_type]:
+                # print(pred2)
+                assert len(pred2.keys()) == 1
+                pred_type2 = list(pred2.keys())[0]
+                _parse_predicate(pred2, pred_type2)
+
+        elif pred_type == "missing":
+            column = pred[pred_type]
+            val = ["NULL"]
+            predicate_types.append("in")
+            predicate_cols.append(column)
+            predicate_vals.append(val)
         else:
+            # assert False
             # TODO: need to support "OR" statements
             return None
             # assert False, "unsupported predicate type"
@@ -372,17 +412,38 @@ def extract_predicates(query):
     predicate_cols = []
     predicate_types = []
     predicate_vals = []
-    parsed_query = parse(query)
+    if "::float" in query:
+        query = query.replace("::float", "")
+    elif "::int" in query:
+        query = query.replace("::int", "")
+    # really fucking dumb
+    bad_str1 = "mii2.info ~ '^(?:[1-9]\d*|0)?(?:\.\d+)?$' AND"
+    bad_str2 = "mii1.info ~ '^(?:[1-9]\d*|0)?(?:\.\d+)?$' AND"
+    if bad_str1 in query:
+        query = query.replace(bad_str1, "")
+
+    if bad_str2 in query:
+        query = query.replace(bad_str2, "")
+
+    try:
+        parsed_query = parse(query)
+    except:
+        print(query)
+        print("moz sql parser failed to parse this!")
+        pdb.set_trace()
     pred_vals = get_all_wheres(parsed_query)
 
-    # print("starting extract predicate cols!")
     for i, pred in enumerate(pred_vals):
-        assert len(pred.keys()) == 1
+        try:
+            assert len(pred.keys()) == 1
+        except:
+            print(pred)
+            pdb.set_trace()
         pred_type = list(pred.keys())[0]
+        # if pred == "or" or pred == "OR":
+            # continue
         _parse_predicate(pred, pred_type)
 
-    # print("extract predicate cols done!")
-    # print("extract predicates took ", time.time() - start)
     return predicate_cols, predicate_types, predicate_vals
 
 def extract_from_clause(query):
@@ -586,7 +647,14 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
 def deterministic_hash(string):
     return hashlib.sha1(str(string).encode("utf-8")).hexdigest()
 
-def get_pg_join_order(sql, join_graph):
+def make_dir(directory):
+    try:
+        os.makedirs(directory)
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
+
+def get_pg_join_order(sql, join_graph, con):
     def __extract_jo(plan):
         if plan["Node Type"] in join_types:
             left = list(extract_aliases(plan["Plans"][0], jg=join_graph))
@@ -604,10 +672,9 @@ def get_pg_join_order(sql, join_graph):
             return ("(" + __extract_jo(plan["Plans"][0])
                     + ") CROSS JOIN ("
                     + __extract_jo(plan["Plans"][1]) + ")")
-        
+
         return __extract_jo(plan["Plans"][0])
-    
-    con = pg.connect(user="imdb", host="localhost", database="imdb")
+
     cursor = con.cursor()
 
     cursor.execute(f"explain (format json) {sql}")
@@ -663,3 +730,30 @@ def extract_join_graph(sql):
         join_graph.nodes()[t1]["predicates"] = matches
 
     return join_graph
+
+def extract_values(obj, key):
+    """Recursively pull values of specified key from nested JSON."""
+    arr = []
+
+    def extract(obj, arr, key):
+        """Return all matching values in an object."""
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                if isinstance(v, (dict, list)):
+                    extract(v, arr, key)
+                elif k == key:
+                    # if "Scan" in v:
+                        # print(v)
+                        # pdb.set_trace()
+                    # if "Join" in v:
+                        # print(obj)
+                        # pdb.set_trace()
+                    arr.append(v)
+
+        elif isinstance(obj, list):
+            for item in obj:
+                extract(item, arr, key)
+        return arr
+
+    results = extract(obj, arr, key)
+    return results
