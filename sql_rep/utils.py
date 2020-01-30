@@ -481,15 +481,13 @@ def extract_from_clause(query):
     from_token = None
     from_seen = False
     for token in parsed.tokens:
-        # print(type(token))
-        # print(token)
         if from_seen:
             if isinstance(token, IdentifierList) or isinstance(token,
                     Identifier):
                 from_token = token
+                break
         if token.ttype is Keyword and token.value.upper() == 'FROM':
             from_seen = True
-
     assert from_token is not None
     if isinstance(from_token, IdentifierList):
         for identifier in from_token.get_identifiers():

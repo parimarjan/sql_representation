@@ -38,10 +38,6 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False,
             - pg_count
             - total_count
     '''
-    if compute_ground_truth:
-        # all the appropriate db keywords must be set
-        assert user is not None
-
     start = time.time()
     join_graph = extract_join_graph(sql)
     subset_graph = generate_subset_graph(join_graph)
@@ -57,6 +53,12 @@ def parse_sql(sql, user, db_name, db_host, port, pwd, timeout=False,
     ret["join_graph"] = join_graph
     ret["subset_graph"] = subset_graph
 
+    if not compute_ground_truth:
+        ret["join_graph"] = nx.adjacency_data(ret["join_graph"])
+        ret["subset_graph"] = nx.adjacency_data(ret["subset_graph"])
+        return ret
+
+    assert user is not None
     make_dir(subset_cache_dir)
     subset_cache_file = subset_cache_dir + get_subset_cache_name(sql)
     # we should check and see which cardinalities of the subset graph
