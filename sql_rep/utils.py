@@ -273,8 +273,13 @@ def extract_join_clause(query):
             continue
         if "<=" in match or ">=" in match:
             continue
-
         match = match.replace(";", "")
+        if "!" in match:
+            left, right = match.split("!=")
+            if "." in right:
+                # must be a join, so add it.
+                join_clauses.append(left.strip() + " != " + right.strip())
+            continue
         left, right = match.split("=")
         # ugh dumb hack
         if "." in right:
@@ -633,6 +638,7 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
             if not "timeout" in str(e):
                 print("failed to execute for reason other than timeout")
                 print(e)
+                return e
             return None
 
     exp_output = cursor.fetchall()
