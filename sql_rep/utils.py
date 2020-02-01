@@ -14,7 +14,6 @@ import pdb
 import os
 import errno
 
-# get rid of these
 import getpass
 
 ALIAS_FORMAT = "{TABLE} AS {ALIAS}"
@@ -603,24 +602,9 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
     @db_host: going to ignore it so default localhost is used.
     @pre_execs: options like set join_collapse_limit to 1 that are executed
     before the query.
-
-    executes the given sql on the DB, and caches the results in a
-    persistent store if it took longer than self.execution_cache_threshold.
     '''
-
-    start = time.time()
-
-    # FIXME: this needs consistent handling
-    os_user = getpass.getuser()
-    if os_user == "ubuntu":
-        # for aws
-        con = pg.connect(user=user, port=port,
-                password=pwd, database=db_name)
-    else:
-        # for chunky
-        con = pg.connect(user=user, host=db_host, port=port,
-                password=pwd, database=db_name)
-
+    con = pg.connect(user=user, host=db_host, port=port,
+            password=pwd, database=db_name)
     cursor = con.cursor()
 
     for setup_sql in pre_execs:
@@ -639,12 +623,11 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
                 print("failed to execute for reason other than timeout")
                 print(e)
                 return e
-            return None
+            return "timeout"
 
     exp_output = cursor.fetchall()
     cursor.close()
     con.close()
-    end = time.time()
 
     return exp_output
 
