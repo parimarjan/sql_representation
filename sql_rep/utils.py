@@ -615,7 +615,7 @@ def execute_query(sql, user, db_host, port, pwd, db_name, pre_execs):
     except Exception as e:
         print(e)
         try:
-            con.commit()
+            # con.commit()
             cursor.close()
             con.close()
         finally:
