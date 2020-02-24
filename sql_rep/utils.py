@@ -149,7 +149,12 @@ def order_to_from_clause(join_graph, join_order, alias_mapping):
             sg = join_graph.subgraph(rels)
             sql = nx_graph_to_query(sg)
             con = pg.connect(user="ubuntu", host="localhost", database="imdb")
-            pg_order = get_pg_join_order(sql, join_graph, con)
+            cursor = con.cursor()
+            cursor.execute(f"explain (format json) {sql}")
+            explain = cursor.fetchall()
+            cursor.close()
+            con.close()
+            pg_order,_,_ = get_pg_join_order(join_graph, explain)
             assert not clauses
             clauses.append(pg_order)
             continue
@@ -641,19 +646,47 @@ def make_dir(directory):
         if e.errno != errno.EEXIST:
             raise
 
-def get_pg_join_order(sql, join_graph, con):
+def get_pg_join_order(join_graph, explain):
+    '''
+    '''
+    physical_join_ops = {}
+    scan_ops = {}
+    def __update_scan(plan):
+        node_types = extract_values(plan, "Node Type")
+        alias = extract_values(plan, "Alias")[0]
+        for nt in node_types:
+            if "Scan" in nt:
+                scan_type = nt
+                break
+        scan_ops[alias] = nt
+
     def __extract_jo(plan):
         if plan["Node Type"] in join_types:
             left = list(extract_aliases(plan["Plans"][0], jg=join_graph))
             right = list(extract_aliases(plan["Plans"][1], jg=join_graph))
+            all_froms = left + right
+            all_nodes = []
+            for from_clause in all_froms:
+                from_alias = from_clause[from_clause.find(" as ")+4:]
+                if "_info" in from_alias:
+                    print(from_alias)
+                    pdb.set_trace()
+                all_nodes.append(from_alias)
+            all_nodes.sort()
+            all_nodes = " ".join(all_nodes)
+            physical_join_ops[all_nodes] = plan["Node Type"]
 
             if len(left) == 1 and len(right) == 1:
+                __update_scan(plan["Plans"][0])
+                __update_scan(plan["Plans"][1])
                 return left[0] +  " CROSS JOIN " + right[0]
 
             if len(left) == 1:
+                __update_scan(plan["Plans"][0])
                 return left[0] + " CROSS JOIN (" + __extract_jo(plan["Plans"][1]) + ")"
 
             if len(right) == 1:
+                __update_scan(plan["Plans"][1])
                 return "(" + __extract_jo(plan["Plans"][0]) + ") CROSS JOIN " + right[0]
 
             return ("(" + __extract_jo(plan["Plans"][0])
@@ -662,14 +695,11 @@ def get_pg_join_order(sql, join_graph, con):
 
         return __extract_jo(plan["Plans"][0])
 
-    cursor = con.cursor()
-
-    cursor.execute(f"explain (format json) {sql}")
-    exp_output = cursor.fetchall()
-    cursor.close()
-    con.close()
-
-    return __extract_jo(exp_output[0][0][0]["Plan"])
+    try:
+        return __extract_jo(explain[0][0][0]["Plan"]), physical_join_ops, scan_ops
+    except:
+        print(explain)
+        pdb.set_trace()
 
 def extract_join_graph(sql):
     '''
