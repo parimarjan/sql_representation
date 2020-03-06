@@ -23,7 +23,7 @@ functions copied over from ryan's utils files
 '''
 
 def connected_subgraphs(g):
-    for i in range(2, len(g)+1):
+    for i in range(1, len(g)+1):
         for nodes_in_sg in itertools.combinations(g.nodes, i):
             sg = g.subgraph(nodes_in_sg)
             if nx.is_connected(sg):
@@ -174,9 +174,14 @@ def extract_aliases(plan, jg=None):
         yield from extract_aliases(subplan, jg=jg)
 
 def analyze_plan(plan):
-    if plan["Node Type"] in join_types:
-        aliases = extract_aliases(plan)
-        data = {"aliases": list(sorted(aliases))}
+    # check if the node is a join or a leaf
+    if plan["Node Type"] in join_types or "Plans" not in plan:
+        aliases = list(extract_aliases(plan))
+
+        # sanity check: if it is a leaf, one alias
+        assert "Plans" in plan or len(aliases) == 1 
+        
+        data = {"aliases": sorted(aliases)}
         if "Plan Rows" in plan:
             data["expected"] = plan["Plan Rows"]
         if "Actual Rows" in plan:
