@@ -116,8 +116,8 @@ def reconstruct_paths(edges):
     if "$" in g.nodes:
         g.remove_node("$")
 
-    for node in g.nodes:
-        assert g.degree(node) <= 2, f"{node} had degree of {g.degree(node)}"
+    # for node in g.nodes:
+        # assert g.degree(node) <= 2, f"{node} had degree of {g.degree(node)}"
 
     conn_comp = nx.algorithms.components.connected_components(g)
     paths = (sorted(x, key=len, reverse=True) for x in conn_comp)
@@ -154,7 +154,8 @@ def order_to_from_clause(join_graph, join_order, alias_mapping):
             con = pg.connect(user="pari", host="localhost", database="imdb",
                    port=5433)
             cursor = con.cursor()
-            cursor.execute(f"explain (format json) {sql}")
+            # cursor.execute(f"explain (format json) {sql}")
+            cursor.execute("explain (format json) {}".format(sql))
             explain = cursor.fetchall()
             cursor.close()
             con.close()
@@ -163,7 +164,8 @@ def order_to_from_clause(join_graph, join_order, alias_mapping):
             clauses.append(pg_order)
             continue
 
-        clause = f"{alias_mapping[rels[0]]} as {rels[0]}"
+        # clause = f"{alias_mapping[rels[0]]} as {rels[0]}"
+        clause = "{} as {}".format(alias_mapping[rels[0]], rels[0])
         clauses.append(clause)
 
     return " CROSS JOIN ".join(clauses)
@@ -177,7 +179,8 @@ def extract_aliases(plan, jg=None):
         if jg:
             alias = plan["Alias"]
             real_name = jg.nodes[alias]["real_name"]
-            yield f"{real_name} as {alias}"
+            # yield f"{real_name} as {alias}"
+            yield "{} as {}".format(real_name, alias)
         else:
             yield plan["Alias"]
 
