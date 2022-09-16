@@ -37,6 +37,8 @@ def generate_subset_graph(g):
     for csg in connected_subgraphs(g):
         subset_graph.add_node(csg)
 
+    # print(subset_graph.nodes)
+    # pdb.set_trace()
     # group by size
     max_subgraph_size = max(len(x) for x in subset_graph.nodes)
     subgraph_groups = [[] for _ in range(max_subgraph_size)]
@@ -148,7 +150,9 @@ def order_to_from_clause(join_graph, join_order, alias_mapping):
             # bottom-level joins.
             sg = join_graph.subgraph(rels)
             sql = nx_graph_to_query(sg)
-            con = pg.connect(user="ubuntu", host="localhost", database="imdb")
+            # con = pg.connect(user="ubuntu", host="localhost", database="imdb")
+            con = pg.connect(user="pari", host="localhost", database="imdb",
+                   port=5433)
             cursor = con.cursor()
             cursor.execute(f"explain (format json) {sql}")
             explain = cursor.fetchall()
@@ -221,15 +225,19 @@ def nodes_to_sql(nodes, join_graph):
     sql_str = nx_graph_to_query(subg, from_clause=from_clause)
     return sql_str
 
-def nx_graph_to_query(G, from_clause=None):
+def nx_graph_to_query(G, from_clause=None, table_pg12=False):
     froms = []
     conds = []
     for nd in G.nodes(data=True):
         node = nd[0]
         data = nd[1]
         if "real_name" in data:
-            froms.append(ALIAS_FORMAT.format(TABLE=data["real_name"],
-                                             ALIAS=node))
+            if table_pg12:
+                froms.append(ALIAS_FORMAT.format(TABLE='"' + data["real_name"] + '"',
+                                                 ALIAS=node))
+            else:
+                froms.append(ALIAS_FORMAT.format(TABLE=data["real_name"],
+                                                 ALIAS=node))
         else:
             froms.append(node)
 
@@ -248,6 +256,8 @@ def nx_graph_to_query(G, from_clause=None):
         wheres = ' AND '.join(conds)
         from_clause += " WHERE " + wheres
     count_query = COUNT_SIZE_TEMPLATE.format(FROM_CLAUSE=from_clause)
+
+    count_query = count_query.replace(";", "")
     return count_query
 
 def extract_join_clause(query):
@@ -278,15 +288,25 @@ def extract_join_clause(query):
         if "<=" in match or ">=" in match:
             continue
         match = match.replace(";", "")
-        if "!" in match:
+
+        if "!=" in match:
             left, right = match.split("!=")
-            if "." in right:
+
+            if not ("id" in left.lower() and "id" in right.lower()):
+                continue
+
+            if right.count(".") == 1 and "'" not in right:
                 # must be a join, so add it.
                 join_clauses.append(left.strip() + " != " + right.strip())
             continue
+
         left, right = match.split("=")
+
+        if not ("id" in left.lower() and "id" in right.lower()):
+            continue
+
         # ugh dumb hack
-        if "." in right:
+        if right.count(".") == 1 and "'" not in right:
             # must be a join, so add it.
             join_clauses.append(left.strip() + " = " + right.strip())
 
@@ -485,7 +505,13 @@ def extract_from_clause(query):
     tables = []
 
     start = time.time()
-    parsed = sqlparse.parse(query)[0]
+    try:
+        parsed = sqlparse.parse(query)[0]
+    except Exception as e:
+        print(e)
+        print(query)
+        pdb.set_trace()
+
     # let us go over all the where clauses
     from_token = None
     from_seen = False
@@ -714,6 +740,7 @@ def extract_join_graph(sql):
         j2 = j.split("=")[1]
         t1 = j1[0:j1.find(".")].strip()
         t2 = j2[0:j2.find(".")].strip()
+
         try:
             assert t1 in tables or t1 in aliases
             assert t2 in tables or t2 in aliases
@@ -722,10 +749,11 @@ def extract_join_graph(sql):
             print(tables)
             print(joins)
             print("table not in tables!")
-            pdb.set_trace()
+            # pdb.set_trace()
 
         join_graph.add_edge(t1, t2)
         join_graph[t1][t2]["join_condition"] = j
+
         if t1 in aliases:
             table1 = aliases[t1]
             table2 = aliases[t2]
